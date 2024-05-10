@@ -1,0 +1,1 @@
+CUDA_VISIBLE_DEVICES=1 python3 train_lightvoc.py --input_wavs_dir ./ --input_training_file LJSpeech-1.1/vctk_train.txt --input_validation_file LJSpeech-1.1/vctk_val.txt --checkpoint_path lightvoc_vctk --config config_vctk.json
