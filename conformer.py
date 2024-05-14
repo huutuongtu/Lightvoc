@@ -133,7 +133,7 @@ class ConformerLayer(torch.nn.Module):
         input = residual + input
         return input
 
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
+    def forward(self, input: torch.Tensor, key_padding_mask: Optional[torch.Tensor]) -> torch.Tensor:
 
         residual = input
         x = self.ffn1(input)
@@ -148,6 +148,7 @@ class ConformerLayer(torch.nn.Module):
             query=x,
             key=x,
             value=x,
+            key_padding_mask=key_padding_mask,
             need_weights=False,
         )
         x = self.self_attn_dropout(x)
@@ -163,7 +164,9 @@ class ConformerLayer(torch.nn.Module):
         x = self.final_layer_norm(x)
         return x
 
+
 class Conformer(torch.nn.Module):
+
 
     def __init__(
         self,
@@ -193,11 +196,11 @@ class Conformer(torch.nn.Module):
             ]
         )
 
-    def forward(self, input: torch.Tensor):
-        
+    def forward(self, input: torch.Tensor, lengths: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+
+        encoder_padding_mask = _lengths_to_padding_mask(lengths)
+
         x = input.transpose(0, 1)
-        out = []
         for layer in self.conformer_layers:
-            x = layer(x)
-            out.append(x.transpose(0, 1))
-        return out
+            x = layer(x, encoder_padding_mask)
+        return x.transpose(0, 1), lengths
