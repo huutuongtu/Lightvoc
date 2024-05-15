@@ -6,6 +6,9 @@ This repo try to implement [LIGHTVOC. AN UPSAMPLING-FREE GAN VOCODER BASED ON CO
 python train_lightvoc.py --config config_v1.json
 ```
 
+## Tensorboard :
+![alt text](https://github.com/huutuongtu/Lightvoc/blob/main/images/441239476_360911536994771_8083938505921743451_n.png)
+
 ## Citations :
 ```
 @article{Dang2023LightVocAU,
