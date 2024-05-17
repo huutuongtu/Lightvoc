@@ -14,10 +14,10 @@ from torch.distributed import init_process_group
 from torch.nn.parallel import DistributedDataParallel
 from env import AttrDict, build_env
 from meldataset import MelDataset, mel_spectrogram, get_dataset_filelist
+from models import Generator, MultiPeriodDiscriminator, MultiScaleDiscriminator, MultiResSpecDiscriminator,\
+    CoMBD, SBD, discriminator_loss, feature_loss, generator_loss
+from pqmf import PQMF
 
-from models import Generator, MultiPeriodDiscriminator, MultiScaleDiscriminator, feature_loss, generator_loss,\
-    discriminator_loss, MultiResSpecDiscriminator
-    
 from utils import plot_spectrogram, scan_checkpoint, load_checkpoint, save_checkpoint
 from stft import TorchSTFT
 
@@ -40,8 +40,16 @@ def train(rank, a, h):
     torch.cuda.manual_seed(h.seed)
     device = torch.device('cuda:{:d}'.format(rank))
 
+    subbands2, taps2, cutoff_ratio2, beta2 = h.pqmf_config["lv2"]
+    subbands1, taps1, cutoff_ratio1, beta1 = h.pqmf_config["lv2"]
+    pqmf_lv2 = PQMF(subbands2, taps2, cutoff_ratio2, beta2)
+    pqmf_lv1 = PQMF(subbands1, taps1, cutoff_ratio1, beta1)
+
     generator = Generator(h).to(device)
-    mpd = MultiPeriodDiscriminator().to(device)
+
+    combd = CoMBD(h.combd, [pqmf_lv2, pqmf_lv1]).to(device)
+    sbd = SBD(h["sbd"]).to(device)
+
     if h.use_mrsd:
         print("Use mrsd...")
         msd = MultiResSpecDiscriminator().to(device)
@@ -69,18 +77,20 @@ def train(rank, a, h):
         state_dict_g = load_checkpoint(cp_g, device)
         state_dict_do = load_checkpoint(cp_do, device)
         generator.load_state_dict(state_dict_g['generator'])
-        mpd.load_state_dict(state_dict_do['mpd'])
+        combd.load_state_dict(state_dict_do['combd'])
+        sbd.load_state_dict(state_dict_do['sbd'])
         msd.load_state_dict(state_dict_do['msd'])
         steps = state_dict_do['steps'] + 1
         last_epoch = state_dict_do['epoch']
 
     if h.num_gpus > 1:
         generator = DistributedDataParallel(generator, device_ids=[rank]).to(device)
-        mpd = DistributedDataParallel(mpd, device_ids=[rank]).to(device)
+        combd = DistributedDataParallel(combd, device_ids=[rank]).to(device)
+        sbd = DistributedDataParallel(sbd, device_ids=[rank]).to(device)
         msd = DistributedDataParallel(msd, device_ids=[rank]).to(device)
 
     optim_g = torch.optim.AdamW(generator.parameters(), h.learning_rate, betas=[h.adam_b1, h.adam_b2])
-    optim_d = torch.optim.AdamW(itertools.chain(msd.parameters(), mpd.parameters()),
+    optim_d = torch.optim.AdamW(itertools.chain(msd.parameters(), sbd.parameters(), combd.parameters()),
                                 h.learning_rate, betas=[h.adam_b1, h.adam_b2])
 
     if state_dict_do is not None:
@@ -119,7 +129,8 @@ def train(rank, a, h):
         sw = SummaryWriter(os.path.join(a.checkpoint_path, 'logs'))
 
     generator.train()
-    mpd.train()
+    combd.train()
+    sbd.train()
     msd.train()
     for epoch in range(max(0, last_epoch), a.training_epochs):
         if rank == 0:
@@ -138,7 +149,20 @@ def train(rank, a, h):
             length = torch.autograd.Variable(length.to(device, non_blocking=True))
             y_mel = torch.autograd.Variable(y_mel.to(device, non_blocking=True))
             y = y.unsqueeze(1)
-            # y_g_hat = generator(x)
+
+            #if use this, need to add some conv in generator, follow: https://github.com/ncsoft/avocodo/blob/2999557bbd040a6f3eb6f7006a317d89537b78cd/avocodo/models/generator.py#L109
+            #in this implement, only last conv is used
+
+            # ys = [
+            #     pqmf_lv2.analysis(
+            #         y
+            #     )[:, :h.projection_filters[1]],
+            #     pqmf_lv1.analysis(
+            #         y
+            #     )[:, :h.projection_filters[2]],
+            #     y
+            # ]
+            ys = [y]
 
             spec, phase = generator(x, length)
 
@@ -147,17 +171,25 @@ def train(rank, a, h):
             y_g_hat_mel = mel_spectrogram(y_g_hat.squeeze(1), h.n_fft, h.num_mels, h.sampling_rate, h.hop_size, h.win_size,
                                           h.fmin, h.fmax_for_loss)
 
+            ys_hat = [y_g_hat.detach()]
+
             optim_d.zero_grad()
+            
+            # combd
+            #ys list length 1 contain y shape batch x 1 x segment_size
+            #y_g_hat shape batch x 1 x segment_size
+            y_du_hat_r, y_du_hat_g, _, _ = combd(ys, ys_hat)
+            loss_disc_u, losses_disc_u_r, losses_disc_u_g = discriminator_loss(y_du_hat_r, y_du_hat_g)
 
-            # MPD
-            y_df_hat_r, y_df_hat_g, _, _ = mpd(y, y_g_hat.detach())
-            loss_disc_f, losses_disc_f_r, losses_disc_f_g = discriminator_loss(y_df_hat_r, y_df_hat_g)
-
+            # sbd
+            y_dp_hat_r, y_dp_hat_g, _, _ = sbd(y, y_g_hat.detach())
+            loss_disc_p, losses_disc_p_r, losses_disc_p_g = discriminator_loss(y_dp_hat_r, y_dp_hat_g)
+            
             # MSD
             y_ds_hat_r, y_ds_hat_g, _, _ = msd(y, y_g_hat.detach())
             loss_disc_s, losses_disc_s_r, losses_disc_s_g = discriminator_loss(y_ds_hat_r, y_ds_hat_g)
 
-            loss_disc_all = loss_disc_s + loss_disc_f
+            loss_disc_all = loss_disc_s + loss_disc_p + loss_disc_u
 
             loss_disc_all.backward()
             optim_d.step()
@@ -167,14 +199,19 @@ def train(rank, a, h):
 
             # L1 Mel-Spectrogram Loss
             loss_mel = F.l1_loss(y_mel, y_g_hat_mel) * 45
-
-            y_df_hat_r, y_df_hat_g, fmap_f_r, fmap_f_g = mpd(y, y_g_hat)
+            y_du_hat_r, y_du_hat_g, fmap_u_r, fmap_u_g = combd(ys, ys_hat)
+            y_dp_hat_r, y_dp_hat_g, fmap_p_r, fmap_p_g = sbd(y, y_g_hat)            
             y_ds_hat_r, y_ds_hat_g, fmap_s_r, fmap_s_g = msd(y, y_g_hat)
-            loss_fm_f = feature_loss(fmap_f_r, fmap_f_g)
+
+            loss_fm_u = feature_loss(fmap_u_r, fmap_u_g)
+            loss_fm_p = feature_loss(fmap_p_r, fmap_p_g)
             loss_fm_s = feature_loss(fmap_s_r, fmap_s_g)
-            loss_gen_f, losses_gen_f = generator_loss(y_df_hat_g)
+
+            loss_gen_u, losses_gen_u = generator_loss(y_du_hat_g)
+            loss_gen_p, losses_gen_p = generator_loss(y_dp_hat_g)
             loss_gen_s, losses_gen_s = generator_loss(y_ds_hat_g)
-            loss_gen_all = loss_gen_s + loss_gen_f + loss_fm_s + loss_fm_f + loss_mel
+
+            loss_gen_all = loss_gen_s + loss_gen_p + loss_gen_u + loss_fm_s + loss_fm_u + loss_fm_p + loss_mel
 
             loss_gen_all.backward()
             optim_g.step()
@@ -199,8 +236,10 @@ def train(rank, a, h):
                     except:
                         print("continue_training")
                     save_checkpoint(checkpoint_path, 
-                                    {'mpd': (mpd.module if h.num_gpus > 1
-                                                         else mpd).state_dict(),
+                                    {'combd': (combd.module if h.num_gpus > 1
+                                                         else combd).state_dict(),
+                                     'sbd': (sbd.module if h.num_gpus > 1
+                                                         else sbd).state_dict(),
                                      'msd': (msd.module if h.num_gpus > 1
                                                          else msd).state_dict(),
                                      'optim_g': optim_g.state_dict(), 'optim_d': optim_d.state_dict(), 'steps': steps,
