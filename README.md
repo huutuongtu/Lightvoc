@@ -23,3 +23,5 @@ python train_lightvoc.py --config config_v1.json
 ## References:
 * https://github.com/jik876/hifi-gan
 * https://github.com/rishikksh20/iSTFTNet-pytorch
+* https://github.com/rishikksh20/UnivNet-pytorch
+* https://github.com/ncsoft/avocodo
