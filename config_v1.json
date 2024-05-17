@@ -34,5 +34,7 @@
         "dist_backend": "nccl",
         "dist_url": "tcp://localhost:6000",
         "world_size": 1
-    }
+    },
+
+    "use_mrsd": true
 }

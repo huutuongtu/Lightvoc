@@ -16,7 +16,7 @@ from env import AttrDict, build_env
 from meldataset import MelDataset, mel_spectrogram, get_dataset_filelist
 
 from models import Generator, MultiPeriodDiscriminator, MultiScaleDiscriminator, feature_loss, generator_loss,\
-    discriminator_loss
+    discriminator_loss, MultiResSpecDiscriminator
     
 from utils import plot_spectrogram, scan_checkpoint, load_checkpoint, save_checkpoint
 from stft import TorchSTFT
@@ -42,7 +42,11 @@ def train(rank, a, h):
 
     generator = Generator(h).to(device)
     mpd = MultiPeriodDiscriminator().to(device)
-    msd = MultiScaleDiscriminator().to(device)
+    if h.use_mrsd:
+        print("Use mrsd...")
+        msd = MultiResSpecDiscriminator().to(device)
+    else:
+        msd = MultiScaleDiscriminator().to(device)
     stft = TorchSTFT(filter_length=h.gen_istft_n_fft, hop_length=h.gen_istft_hop_size, win_length=h.gen_istft_n_fft, device=device).to(device)
 
     if rank == 0:
@@ -268,7 +272,7 @@ def main():
     parser.add_argument('--input_validation_file', default='LJSpeech-1.1/validation.txt')
     parser.add_argument('--checkpoint_path', default='lightvoc_checkpoint')
     parser.add_argument('--config', default='')
-    parser.add_argument('--training_epochs', default=1000, type=int)
+    parser.add_argument('--training_epochs', default=3000, type=int)
     parser.add_argument('--stdout_interval', default=5, type=int)
     parser.add_argument('--checkpoint_interval', default=10000, type=int)
     parser.add_argument('--summary_interval', default=100, type=int)
